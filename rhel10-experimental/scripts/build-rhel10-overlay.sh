@@ -200,12 +200,24 @@ cp "${REPO_ROOT}/scripts/coco/podvm/script-disk-mods.sh" "${COCO_SCRIPTS_DIR}/sc
 if [[ -n "${DEBUG_BUILD:-}" ]]; then
     sed -i "s/DEBUG_BUILD:-0}/DEBUG_BUILD:-${DEBUG_BUILD}}/" "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/script-disk-mods.sh"
 fi
+# Uptycs EDR: stage everything patches/coco-components.sh needs into ARTIFACTS_FOLDER
+# (scripts/coco/podvm/ → /scripts/coco/podvm/ in the container via ADD scripts /scripts).
+# The tarball is the latest extracted payload (scripts/openshift extract-uptycs → edr/),
+# committed to this repo. Re-staged fresh every build AFTER the stale-tarball cleanup above.
+UPTYCS_TARBALL_SRC=$(readlink -f "${REPO_ROOT}/edr/uptycs-complete.tar.gz" 2>/dev/null || true)
+if [[ -z "${UPTYCS_TARBALL_SRC}" || ! -s "${UPTYCS_TARBALL_SRC}" ]]; then
+    echo "ERROR: ${REPO_ROOT}/edr/uptycs-complete.tar.gz missing — run 'scripts/openshift extract-uptycs' and commit it" >&2
+    exit 1
+fi
+cp "${UPTYCS_TARBALL_SRC}"                               "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/uptycs-complete.tar.gz"
 cp "${REPO_ROOT}/scripts/coco/podvm/install-uptycs.sh"   "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
 cp "${REPO_ROOT}/scripts/coco/podvm/provision-uptycs.sh" "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
+cp "${REPO_ROOT}/services/uptycs-osquery.service"        "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
+chmod 0755 "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/install-uptycs.sh" \
+           "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/provision-uptycs.sh"
+echo "✓ Uptycs staged: $(basename "${UPTYCS_TARBALL_SRC}")"
 # example_run.sh — adds -v /boot:/boot:ro and -v /dev:/dev (fixes supermin kernel lookup on Ubuntu)
 cp "${REPO_ROOT}/scripts/coco/podvm/example_run.sh"      "${COCO_SCRIPTS_DIR}/"
-mkdir -p "${COCO_SCRIPTS_DIR}/services"
-cp "${REPO_ROOT}/services/uptycs-osquery.service" "${COCO_SCRIPTS_DIR}/services/"
 # IBM patches to upstream coco-podvm-scripts files — tracked in repo, applied on top of
 # the upstream clone every build. See rhel10-experimental/UPSTREAM_DEVIATIONS.md entries
 # 9, 10, 11 for rationale. Never edit the upstream clone directly on the build host.
@@ -464,6 +476,7 @@ verify_selinux_label() {
 
 verify_selinux_label "${OUTPUT_QCOW2}" /usr/sbin/ip              bin_t
 verify_selinux_label "${OUTPUT_QCOW2}" /usr/local/bin/kata-agent bin_t
+verify_selinux_label "${OUTPUT_QCOW2}" /usr/bin/osqueryd         bin_t
 echo "✓ SELinux labels verified in QCOW2"
 
 # ---------------------------------------------------------------------------
@@ -499,6 +512,43 @@ else
     echo "  ✓ create-scratch.sh in image contains '--pbkdf pbkdf2' (fast KDF confirmed)"
 fi
 echo "✓ create-scratch.sh optimisation verified"
+
+# ---------------------------------------------------------------------------
+# STEP 5e: Assert Uptycs EDR was installed by install-uptycs.sh (virt-customize --run
+# in patches/coco-components.sh). Checked host-side on the finished QCOW2.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Step 5e: Verifying Uptycs EDR install in image ---"
+if [[ -z "${SCRATCH_CHECK_PART}" ]]; then
+    echo "ERROR: Step 5e: root partition not found" >&2; exit 1
+fi
+UPTYCS_FAIL=0
+while read -r kind path; do
+    res=$(guestfish --ro -a "${OUTPUT_QCOW2}" -m "${SCRATCH_CHECK_PART}" -- "${kind}" "${path}" 2>/dev/null || echo false)
+    if [[ "${res}" == "true" ]]; then
+        echo "  ✓ ${kind} ${path}"
+    else
+        echo "  ✗ ${kind} ${path}" >&2; UPTYCS_FAIL=1
+    fi
+done <<'CHECKS'
+is-file /usr/bin/osqueryd
+is-file /usr/bin/uptycs-protect
+is-file /usr/bin/uptycs-nft
+is-file /usr/bin/bpf_progs.o
+is-file /usr/bin/uptycs_audit_conf.sh
+is-file /usr/share/osquery/certs/ca.crt
+is-file /usr/local/bin/provision-uptycs.sh
+is-file /etc/systemd/system/uptycs-osquery.service
+is-symlink /etc/systemd/system/multi-user.target.wants/uptycs-osquery.service
+is-symlink /etc/osquery
+is-file /UPTYCS_INSTALL_SUCCESS
+CHECKS
+if [[ "${UPTYCS_FAIL}" -ne 0 ]]; then
+    echo "ERROR: Uptycs EDR not correctly installed in ${OUTPUT_QCOW2}" >&2
+    echo "       Inspect: guestfish --ro -a ${OUTPUT_QCOW2} -m ${SCRATCH_CHECK_PART} -- cat /var/log/uptycs-install.log" >&2
+    exit 1
+fi
+echo "✓ Uptycs EDR installed and enabled"
 
 echo ""
 echo "✓ All verification checks passed. Ready to upload."

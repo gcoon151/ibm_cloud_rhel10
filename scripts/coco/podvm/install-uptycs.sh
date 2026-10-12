@@ -147,9 +147,8 @@ echo ""
 
 # Verify binaries
 echo "[STEP 7/10] Verifying installed binaries..."
-file /usr/bin/osqueryd
-file /usr/bin/uptycs-protect
-file /usr/bin/uptycs-nft
+# `file` is not guaranteed in minimal RHEL 10 bases — informational only, not fatal under set -e
+file /usr/bin/osqueryd /usr/bin/uptycs-protect /usr/bin/uptycs-nft 2>/dev/null || true
 ls -lh /usr/bin/osqueryd /usr/bin/uptycs-protect /usr/bin/uptycs-nft /usr/bin/bpf_progs.o /usr/bin/uptycs_audit_conf.sh
 echo "✓ Binary verification complete"
 echo ""

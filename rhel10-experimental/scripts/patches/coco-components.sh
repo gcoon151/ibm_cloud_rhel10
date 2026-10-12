@@ -90,13 +90,26 @@ SM_REGISTER=""
 [[ -n "$ROOT_PASSWORD" ]] && EXTRA_ARGS=" --root-password password:${ROOT_PASSWORD} "
 [[ -n "${ACTIVATION_KEY}" && -n "${ORG_ID}" ]] && SM_REGISTER=(--run-command "subscription-manager register --org=${ORG_ID} --activationkey=${ACTIVATION_KEY}") || SM_REGISTER=()
 
+# IBM MOD: Uptycs EDR is mandatory for IBM images. build-rhel10-overlay.sh stages these
+# four files into ARTIFACTS_FOLDER; fail loudly if any is missing (no silent skip).
+for f in uptycs-complete.tar.gz provision-uptycs.sh uptycs-osquery.service install-uptycs.sh; do
+    if [[ ! -s "$ARTIFACTS_FOLDER/$f" ]]; then
+        echo "ERROR: $ARTIFACTS_FOLDER/$f missing — Uptycs cannot be installed" >&2
+        exit 1
+    fi
+done
+
 virt-customize --memsize 8192 \
     "${SM_REGISTER[@]}" \
     --run $ARTIFACTS_FOLDER/script-disk-mods.sh \
     --copy-in $ARTIFACTS_FOLDER/podvm-binaries.tar.gz:/tmp/ \
     --copy-in $ARTIFACTS_FOLDER/pause-bundle.tar.gz:/tmp/ \
     --copy-in $ARTIFACTS_FOLDER/luks-config.tar.gz:/tmp/ \
+    --copy-in $ARTIFACTS_FOLDER/uptycs-complete.tar.gz:/tmp/ \
+    --copy-in $ARTIFACTS_FOLDER/provision-uptycs.sh:/tmp/ \
+    --copy-in $ARTIFACTS_FOLDER/uptycs-osquery.service:/tmp/ \
     --run $ARTIFACTS_FOLDER/podvm_maker.sh \
+    --run $ARTIFACTS_FOLDER/install-uptycs.sh \
     ${EXTRA_ARGS} \
     -a $INPUT_IMAGE
 

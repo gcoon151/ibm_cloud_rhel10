@@ -361,34 +361,13 @@ echo "✓ process-user-data PCR8 override installed"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== [6/6] Installing Uptycs EDR agent ==="
-# TODO: Uptycs installation is temporarily disabled while the core image is being
-# validated. The staging mechanism (virt-copy-in in build-rhel10-overlay.sh) has not
-# been implemented yet. The full hard-fail enforcement below is written and ready —
-# uncomment it once staging is in place and the install script is validated on RHEL 10.
-#
-# UPTYCS_INSTALL=/tmp/uptycs-install/install-uptycs.sh
-# if [[ ! -f "${UPTYCS_INSTALL}" ]]; then
-#     echo "ERROR: ${UPTYCS_INSTALL} not found in guest filesystem" >&2
-#     echo "       build-rhel10-overlay.sh must stage Uptycs scripts via virt-copy-in" >&2
-#     echo "       before calling example_run.sh. See UPSTREAM_DEVIATIONS.md." >&2
-#     exit 1
-# fi
-# if ! bash "${UPTYCS_INSTALL}"; then
-#     echo "ERROR: Uptycs installation script failed (exit $?)" >&2
-#     exit 1
-# fi
-# for uptycs_check in /opt/uptycs/bin/osqueryd /etc/systemd/system/uptycs-osquery.service; do
-#     if [[ ! -e "${uptycs_check}" ]]; then
-#         echo "ERROR: Uptycs post-install check failed — ${uptycs_check} not found" >&2
-#         exit 1
-#     fi
-# done
-# if ! systemctl is-enabled uptycs-osquery.service &>/dev/null; then
-#     echo "ERROR: uptycs-osquery.service is not enabled after installation" >&2
-#     exit 1
-# fi
-# echo "✓ Uptycs EDR agent installed and enabled"
-echo "⚠ Uptycs installation skipped (staging not yet implemented — see TODO above)"
+# Uptycs is installed by a separate virt-customize step that runs right after this
+# script: `--run install-uptycs.sh` (patches/coco-components.sh on RHEL 10,
+# scripts/coco/coco-components.sh on RHEL 9). install-uptycs.sh is set -e and
+# hard-fails on any missing file; build-rhel10-overlay.sh Step 5e then verifies
+# /usr/bin/osqueryd, the unit + enablement symlink and /UPTYCS_INSTALL_SUCCESS
+# on the finished QCOW2.
+echo "  (Uptycs installed next by install-uptycs.sh — verified host-side in Step 5e)"
 
 # ---------------------------------------------------------------------------
 # DEBUG LOGGING — placed at END so it runs after all tar extractions.
