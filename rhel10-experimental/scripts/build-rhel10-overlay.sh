@@ -42,6 +42,7 @@ fi
 PAYLOAD_TAG="${PAYLOAD_TAG:-1.13.1}"
 SSHD_SERVICE="${SSHD_SERVICE:-true}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-rhel10}"
+BOOT_MODE="${BOOT_MODE:-grub}"
 DATE=$(date -u +%Y%m%d%H)
 # Overlay output goes alongside the base in /var/lib/libvirt/images/rhel10/
 # so it is safe from /tmp cleanups and on the same filesystem.
@@ -306,6 +307,7 @@ export PAUSE_BUNDLE="${PODVM_BINARY_DIGEST_FOR_INJECT}"
 export SSHD_SERVICE="${SSHD_SERVICE}"
 export NVIDIA_DRIVER_VERSION=""
 export DEBUG_BUILD="${DEBUG_BUILD:-}"
+export BOOT_MODE="${BOOT_MODE}"
 # ACTIVATION_KEY must be exported for create-verity-podvm.sh's inner build.
 export ACTIVATION_KEY ORG_ID
 
@@ -331,7 +333,7 @@ VERIFY_SCRIPT="${REPO_ROOT}/scripts/verify-qcow2.sh"
 if [[ ! -f "${VERIFY_SCRIPT}" ]]; then
     echo "ERROR: verify-qcow2.sh not found at ${VERIFY_SCRIPT}" >&2; exit 1
 fi
-bash "${VERIFY_SCRIPT}" "${OUTPUT_QCOW2}"
+bash "${VERIFY_SCRIPT}" "${OUTPUT_QCOW2}" --boot-mode "${BOOT_MODE}"
 
 # ---------------------------------------------------------------------------
 # STEP 5b: Assert CDH binary version matches the expected payload

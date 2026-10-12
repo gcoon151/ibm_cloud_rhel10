@@ -460,10 +460,18 @@ for bin in /usr/local/bin/confidential-data-hub /usr/local/bin/attestation-agent
     fi
 done
 
-UKI_FILE=$(ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | head -1 | xargs -r basename)
-if [[ -z "${UKI_FILE}" ]]; then
-    echo "ERROR: no UKI (.efi) found in /boot/efi/EFI/Linux/ — kickstart or kernel install failed" >&2
-    exit 1
+# Source the file if it exists (virt-customize runs scripts in a clean guest env).
+[[ -f /etc/podvm-build-env ]] && source /etc/podvm-build-env
+
+UKI_FILE=""
+if [ "${BOOT_MODE:-grub}" = "uki" ]; then
+    UKI_FILE=$(ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | head -1 | xargs -r basename)
+    if [[ -z "${UKI_FILE}" ]]; then
+        echo "ERROR: no UKI (.efi) found in /boot/efi/EFI/Linux/ — kickstart or kernel install failed" >&2
+        exit 1
+    fi
+else
+    UKI_FILE="none (grub boot mode)"
 fi
 
 KERNEL_VERSION=$(ls /usr/lib/modules/ 2>/dev/null | head -1)
@@ -489,8 +497,6 @@ KA_VERSION=$(/usr/local/bin/kata-agent --version 2>/dev/null | awk '{print $3}' 
 # PODVM_BINARY and PODVM_BINARY_DIGEST are available via one of two mechanisms:
 # - RHEL 10: injected into the container image by build-rhel10-overlay.sh Step 2 (B2 fix)
 # - RHEL 9:  written to /etc/podvm-build-env by coco-components.sh before virt-customize runs
-# Source the file if it exists (virt-customize runs scripts in a clean guest env).
-[[ -f /etc/podvm-build-env ]] && source /etc/podvm-build-env
 PAYLOAD_IMAGE="${PODVM_BINARY:-unknown}"
 PAYLOAD_DIGEST="${PODVM_BINARY_DIGEST:-unknown}"
 
@@ -527,6 +533,7 @@ cat > /etc/podvm-version.json << MANIFEST
   "build_date": "${BUILD_TS}",
   "rhel_version": "${RHEL_VERSION}",
   "kernel_version": "${KERNEL_VERSION}",
+  "boot_mode": "${BOOT_MODE:-grub}",
   "uki_filename": "${UKI_FILE}",
   "payload_image": "${PAYLOAD_IMAGE}",
   "payload_digest": "${PAYLOAD_DIGEST}",

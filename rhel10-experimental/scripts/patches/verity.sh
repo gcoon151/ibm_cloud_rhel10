@@ -306,6 +306,91 @@ function apply_dmverity()
     export RH
 }
 
+function inject_grub_cmdline()
+{
+    echo "Injecting verity command line into GRUB BLS entries..."
+    
+    # 1. Determine partition UNIQUE GUID (PARTUUID) for root and verity partitions
+    get_part_uuid_and_type() {
+        local dev="$1"
+        local pnum="$2"
+        sgdisk -i "$pnum" "$dev" 2>/dev/null | grep -i "Partition unique GUID" | awk '{print $4}' | tr '[:upper:]' '[:lower:]'
+    }
+    get_part_type_guid() {
+        local dev="$1"
+        local pnum="$2"
+        sgdisk -i "$pnum" "$dev" 2>/dev/null | grep -i "Partition GUID code" | awk '{print $4}' | tr '[:upper:]' '[:lower:]'
+    }
+
+    local ROOT_PARTUUID=""
+    local VERITY_PARTUUID=""
+    local BOOT_PART_NUM=""
+
+    local PART_COUNT=$(sgdisk -p "$NBD_DEVICE" | grep -E "^[[:space:]]*[0-9]+" | awk '{print $1}' | sort -n | tail -1)
+    for pnum in $(seq 1 "$PART_COUNT"); do
+        local TYPE_GUID=$(get_part_type_guid "$NBD_DEVICE" "$pnum")
+        if [[ "$TYPE_GUID" == *"4f68bce3-e8cd-4db1-96e7-fbcaf984b709"* ]]; then
+            ROOT_PARTUUID=$(get_part_uuid_and_type "$NBD_DEVICE" "$pnum")
+        fi
+        if [[ "$TYPE_GUID" == *"2c7357ed-ebd2-46d9-aec1-23d437ec2bf5"* ]]; then
+            VERITY_PARTUUID=$(get_part_uuid_and_type "$NBD_DEVICE" "$pnum")
+        fi
+        # /boot partition can be BC13C2FF-... (xbootldr) or 0FC63DAF-... (linux-generic)
+        if [[ "$TYPE_GUID" == *"bc13c2ff-59e6-4262-a352-b275fd6f7172"* || "$TYPE_GUID" == *"0fc63daf-8483-4772-8e79-3d69d8477de4"* ]]; then
+            if blkid -o value -s TYPE "${NBD_DEVICE}p${pnum}" 2>/dev/null | grep -q "ext4"; then
+                BOOT_PART_NUM="$pnum"
+            fi
+        fi
+    done
+
+    if [[ -z "$ROOT_PARTUUID" || -z "$VERITY_PARTUUID" || -z "$BOOT_PART_NUM" ]]; then
+        echo "ERROR: failed to identify all partitions: root=$ROOT_PARTUUID, verity=$VERITY_PARTUUID, boot=$BOOT_PART_NUM" >&2
+        exit 1
+    fi
+    echo "  Root Partition unique GUID:   $ROOT_PARTUUID"
+    echo "  Verity Partition unique GUID: $VERITY_PARTUUID"
+    echo "  Boot partition number:        $BOOT_PART_NUM"
+
+    # 2. Mount the /boot partition read-write
+    local boot_dev="${NBD_DEVICE}p${BOOT_PART_NUM}"
+    mount "$boot_dev" mnt
+    boot_mounted=1
+
+    # 3. Check BLS entries exist
+    local bls_entries=(mnt/loader/entries/*.conf)
+    if [[ ${#bls_entries[@]} -eq 0 || ! -f "${bls_entries[0]}" ]]; then
+        echo "ERROR: No BLS entry files found in /boot/loader/entries/" >&2
+        exit 1
+    fi
+
+    # 4. For each entry, rewrite the options line
+    for entry in "${bls_entries[@]}"; do
+        echo "  Processing BLS entry: $entry"
+        local current_options=$(grep "^options " "$entry" | cut -d' ' -f2-)
+        # Strip old properties and clean whitespace
+        local cleaned_options=$(echo "$current_options" | sed -E -e 's/root=[^ ]+//g' -e 's/rhgb//g' -e 's/quiet//g' -e 's/crashkernel=[^ ]+//g' | tr -s ' ')
+        
+        # New verity options to append (explicit verity_root properties are required since systemd-gpt-auto-generator
+        # relies on LoaderDevicePartUUID which systemd-stub sets but grub does not).
+        local verity_opts="root=/dev/mapper/root systemd.verity_root_data=PARTUUID=${ROOT_PARTUUID} systemd.verity_root_hash=PARTUUID=${VERITY_PARTUUID} roothash=${RH} systemd.verity_root_options=panic-on-corruption systemd.volatile=overlay console=ttyS0"
+        
+        sed -i "s|^options .*|options ${cleaned_options} ${verity_opts}|" "$entry"
+        echo "    New options: $(grep "^options " "$entry")"
+    done
+
+    # 5. Assertions
+    local entries_count=${#bls_entries[@]}
+    local match_count=$(grep -c "roothash=${RH}" mnt/loader/entries/*.conf || echo 0)
+    if [[ "$match_count" -ne "$entries_count" ]]; then
+        echo "ERROR: not all BLS entries were successfully updated with roothash=$RH" >&2
+        exit 1
+    fi
+    echo "✓ Successfully updated $match_count BLS entries with roothash=$RH"
+
+    umount mnt
+    boot_mounted=0
+}
+
 function create_uki_addon()
 {
     UKI_FOLDER=mnt/EFI/Linux
@@ -412,9 +497,13 @@ if [ "$APPLY_VERITY" = "true" ]; then
     echo ""
     apply_dmverity
 
-    # Step 4. Prepare and install the addon
+    # Step 4. Prepare and install the addon or inject GRUB cmdline
     echo ""
-    create_uki_addon
+    if [ "${BOOT_MODE:-uki}" = "grub" ]; then
+        inject_grub_cmdline
+    else
+        create_uki_addon
+    fi
 fi
 
 
