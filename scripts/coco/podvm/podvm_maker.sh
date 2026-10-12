@@ -516,13 +516,17 @@ if [[ "${PAYLOAD_IMAGE}" == "unknown" || -z "${PAYLOAD_IMAGE}" ]]; then
     echo "       The version manifest would be untrustworthy. Failing the build." >&2
     exit 1
 fi
-if [[ "${PAYLOAD_DIGEST}" == "unknown" || -z "${PAYLOAD_DIGEST}" || \
-      "${PAYLOAD_DIGEST}" == *"PLACEHOLDER"* || \
-      ! "${PAYLOAD_DIGEST}" =~ ^registry\.redhat\.io.*@sha256:[0-9a-f]{64}$ ]]; then
-    echo "ERROR: PODVM_BINARY_DIGEST is invalid: '${PAYLOAD_DIGEST}'" >&2
-    echo "       Expected format: registry.redhat.io/...@sha256:<64 hex chars>" >&2
-    echo "       build-rhel10-overlay.sh Step 2 must inject a real digest before the container build." >&2
-    exit 1
+if [[ "${RHEL_VERSION}" =~ ^10 ]]; then
+    if [[ "${PAYLOAD_DIGEST}" == "unknown" || -z "${PAYLOAD_DIGEST}" || \
+          "${PAYLOAD_DIGEST}" == *"PLACEHOLDER"* || \
+          ! "${PAYLOAD_DIGEST}" =~ ^registry\.redhat\.io.*@sha256:[0-9a-f]{64}$ ]]; then
+        echo "ERROR: PODVM_BINARY_DIGEST is invalid: '${PAYLOAD_DIGEST}'" >&2
+        echo "       Expected format: registry.redhat.io/...@sha256:<64 hex chars>" >&2
+        echo "       build-rhel10-overlay.sh Step 2 must inject a real digest before the container build." >&2
+        exit 1
+    fi
+else
+    echo "RHEL 9 build: skipping strict PODVM_BINARY_DIGEST validation (value: '${PAYLOAD_DIGEST}')"
 fi
 
 # PAUSE_BUNDLE is exported by build-rhel10-overlay.sh Step 4 (Fix 3).
