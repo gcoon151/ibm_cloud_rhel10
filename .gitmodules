@@ -25,3 +25,6 @@
 [submodule "upstream-repos/kata-containers-upstream"]
 	path = upstream-repos/kata-containers-upstream
 	url = https://github.com/kata-containers/kata-containers.git
+[submodule "upstream-repos/coco-podvm-scripts"]
+	path = upstream-repos/coco-podvm-scripts
+	url = https://github.com/confidential-devhub/coco-podvm-scripts.git
