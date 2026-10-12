@@ -255,17 +255,28 @@ else
 import sys, json
 try:
     d = json.load(sys.stdin)
+    payload_img = d.get('payload_image', '?')
+    gc_ver = d.get('guest_components_version')
+    if not gc_ver or gc_ver == '?':
+        if '1.13.' in payload_img: gc_ver = 'v0.21.0+ (RCAR 0.4.0)'
+        elif '1.10.' in payload_img: gc_ver = '~v0.12.x (RCAR 0.2.0)'
+        else: gc_ver = '?'
+    ka_ver = d.get('kata_agent_version')
+    if not ka_ver or ka_ver == '?':
+        if '1.13.' in payload_img: ka_ver = '3.31.0'
+        elif '1.10.' in payload_img: ka_ver = '3.17.0'
+        else: ka_ver = '?'
     rows = [
-        ('Build date',          d.get('build_date','?')),
-        ('RHEL version',        d.get('rhel_version','?')),
-        ('Kernel',              d.get('kernel_version','?')),
-        ('UKI filename',        d.get('uki_filename','?')),
-        ('Payload image',       d.get('payload_image','?')),
-        ('Payload digest',      d.get('payload_digest','?')),
-        ('Pause bundle image',  d.get('pause_bundle_image','?')),
-        ('CDH binary date',     d.get('cdh_binary_date','?')),
-        ('AA binary date',      d.get('aa_binary_date','?')),
-        ('kata-agent date',     d.get('kata_agent_binary_date','?')),
+        ('Build date',              d.get('build_date','?')),
+        ('RHEL version',            d.get('rhel_version','?')),
+        ('Kernel',                  d.get('kernel_version','?')),
+        ('UKI filename',            d.get('uki_filename','?')),
+        ('Payload image',           payload_img),
+        ('Payload digest',          d.get('payload_digest','?')),
+        ('Pause bundle image',      d.get('pause_bundle_image','?')),
+        ('Guest Components ver',    gc_ver),
+        ('Kata Agent ver',          ka_ver),
+        ('CDH / AA build date',     d.get('cdh_binary_date', d.get('aa_binary_date', '?'))),
     ]
     for label, val in rows:
         print(f'  │  {label:<24} {val}')

@@ -504,6 +504,9 @@ AA_DATE=$(epoch_to_date "$AA_MTIME")
 KA_DATE=$(epoch_to_date "$KA_MTIME")
 BUILD_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
+# Determine kata-agent semantic version
+KA_VERSION=$(/usr/local/bin/kata-agent --version 2>/dev/null | awk '{print $3}' || echo "unknown")
+
 # PODVM_BINARY and PODVM_BINARY_DIGEST are available via one of two mechanisms:
 # - RHEL 10: injected into the container image by build-rhel10-overlay.sh Step 2 (B2 fix)
 # - RHEL 9:  written to /etc/podvm-build-env by coco-components.sh before virt-customize runs
@@ -511,6 +514,16 @@ BUILD_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 [[ -f /etc/podvm-build-env ]] && source /etc/podvm-build-env
 PAYLOAD_IMAGE="${PODVM_BINARY:-unknown}"
 PAYLOAD_DIGEST="${PODVM_BINARY_DIGEST:-unknown}"
+
+# Map payload image to upstream guest components version
+GC_VERSION="unknown"
+if [[ "${PAYLOAD_IMAGE}" =~ 1\.13\.[0-9]+ ]]; then
+    GC_VERSION="v0.21.0+"
+elif [[ "${PAYLOAD_IMAGE}" =~ 1\.12\.[0-9]+ ]]; then
+    GC_VERSION="v0.18.0+"
+elif [[ "${PAYLOAD_IMAGE}" =~ 1\.10\.[0-9]+ ]]; then
+    GC_VERSION="~v0.12.x"
+fi
 
 # Hard-fail on any bad value — a manifest recording "unknown" or a placeholder is worse than no manifest.
 if [[ "${PAYLOAD_IMAGE}" == "unknown" || -z "${PAYLOAD_IMAGE}" ]]; then
@@ -539,6 +552,8 @@ cat > /etc/podvm-version.json << MANIFEST
   "payload_image": "${PAYLOAD_IMAGE}",
   "payload_digest": "${PAYLOAD_DIGEST}",
   "pause_bundle_image": "${PAUSE_BUNDLE_IMAGE}",
+  "guest_components_version": "${GC_VERSION}",
+  "kata_agent_version": "${KA_VERSION}",
   "cdh_binary_date": "${CDH_DATE}",
   "aa_binary_date": "${AA_DATE}",
   "kata_agent_binary_date": "${KA_DATE}"
