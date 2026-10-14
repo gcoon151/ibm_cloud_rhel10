@@ -39,6 +39,7 @@ fi
 [[ -n "${SSHD_SERVICE:-}" ]] && run_extras+=" -e SSHD_SERVICE=${SSHD_SERVICE} "
 [[ -n "${NVIDIA_DRIVER_VERSION:-}" ]] && run_extras+=" -e NVIDIA_DRIVER_VERSION=${NVIDIA_DRIVER_VERSION} "
 [[ -n "${BOOT_MODE:-}" ]] && run_extras+=" -e BOOT_MODE=${BOOT_MODE} "
+[[ -n "${HARDENED:-}" ]] && run_extras+=" -e HARDENED=${HARDENED} "
 
 # Bind-mount root's registry auth into the container so podman inside can pull from
 # registry.redhat.io. sudo podman login (in build-rhel10-overlay.sh Step 4) writes

@@ -24,11 +24,13 @@ set -euo pipefail
 QCOW2=""
 MIN_BINARY_DATE="2026-07-24"
 EXPECTED_PAYLOAD_TAG=""
+BOOT_MODE="uki"   # override with --boot-mode grub for grub-chain images
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --min-binary-date) MIN_BINARY_DATE="$2"; shift 2 ;;
         --payload-tag)     EXPECTED_PAYLOAD_TAG="$2"; shift 2 ;;
+        --boot-mode)       BOOT_MODE="$2"; shift 2 ;;
         -*)  echo "Unknown option: $1" >&2; exit 1 ;;
         *)   QCOW2="$1"; shift ;;
     esac
@@ -107,25 +109,34 @@ ROOT_GUID="4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"
 # V3 fix: x86-64 root verity GUID (not 32-bit x86 D13C5D3B...).
 # Verified from RHEL 10 image: 2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5
 VERITY_GUID="2C7357ED-EBD2-46D9-AEC1-23D437EC2BF5"
+# grub mode only: XBOOTLDR type for /boot partition (BC13C2FF-59E6-4262-A352-B275FD6F7172)
+XBOOTLDR_GUID="BC13C2FF-59E6-4262-A352-B275FD6F7172"
 VERITY_FOUND=0
+XBOOTLDR_FOUND=0
 
 PART_COUNT=$(guestfish --ro -a "$QCOW2" -- run : part-list /dev/sda 2>/dev/null | grep -c 'part_num' || true)
 ok "Partition count: $PART_COUNT"
 
-for PNUM in 1 2 3 4; do
+for PNUM in 1 2 3 4 5; do
     GUID=$(guestfish --ro -a "$QCOW2" -- run : part-get-gpt-type /dev/sda $PNUM 2>/dev/null | tr -d '\n' || true)
     [[ -z "$GUID" ]] && continue
     echo "    Part $PNUM GUID: $GUID"
     case "${GUID^^}" in
-        "$EFI_GUID")    ok "  Part $PNUM is EFI System Partition" ;;
-        "$ROOT_GUID")   ok "  Part $PNUM is Linux x86-64 root (required for dm-verity)" ;;
-        "$VERITY_GUID") ok "  Part $PNUM is Linux x86-64 root verity — dm-verity hash partition present"; VERITY_FOUND=1 ;;
+        "$EFI_GUID")      ok "  Part $PNUM is EFI System Partition" ;;
+        "$ROOT_GUID")     ok "  Part $PNUM is Linux x86-64 root (required for dm-verity)" ;;
+        "$VERITY_GUID")   ok "  Part $PNUM is Linux x86-64 root verity — dm-verity hash partition present"; VERITY_FOUND=1 ;;
+        "$XBOOTLDR_GUID") ok "  Part $PNUM is XBOOTLDR /boot (grub mode)"; XBOOTLDR_FOUND=1 ;;
     esac
 done
 
 # V3 fix: verity partition is REQUIRED — fail if absent
 if [[ $VERITY_FOUND -eq 0 ]]; then
     fail "No x86-64 root verity partition (GUID $VERITY_GUID) found — dm-verity was not applied"
+fi
+
+# grub mode: XBOOTLDR /boot partition is required
+if [[ "${BOOT_MODE}" == "grub" && $XBOOTLDR_FOUND -eq 0 ]]; then
+    fail "grub mode: No XBOOTLDR /boot partition (GUID $XBOOTLDR_GUID) found"
 fi
 
 # Fix 4: assert no linux-generic (0FC63DAF) partition exists in the finished image.
@@ -149,35 +160,100 @@ if ! guestfish --ro -a "$QCOW2" -- run : part-list /dev/sda 2>/dev/null | grep -
 fi
 
 # ---------------------------------------------------------------------------
-# 3. UKI in EFI partition
+# 3. Boot chain in EFI partition
 # ---------------------------------------------------------------------------
-# V2 fix: mount EFI partition at / inside guestfish (no /boot/efi mountpoint
-# on the EFI partition itself). Previously used -m /dev/sda1:/boot/efi which
-# gave "mount point is not a directory" (hidden by 2>/dev/null) and falsely
-# reported UKI/addon missing when they were present (seen in C-15 verify).
+# uki mode:  EFI/Linux/<machine-id>-<ver>.efi + .extra.d/verity.addon.efi
+# grub mode: EFI/redhat/shimx64.efi (Microsoft-signed) + EFI/redhat/grubx64.efi (RH-signed)
+#            No EFI/Linux UKI should be present in grub mode.
 echo ""
-echo "--- [3] UKI in EFI partition ---"
-UKI_FILES=$(guestfish --ro -a "$QCOW2" -- \
-    run : mount /dev/sda1 / : find /EFI/Linux 2>/dev/null | grep '\.efi$' || true)
-if [[ -n "$UKI_FILES" ]]; then
-    ok "UKI present in EFI/Linux: $(echo "$UKI_FILES" | tr '\n' ' ')"
+if [[ "${BOOT_MODE}" == "grub" ]]; then
+    echo "--- [3] Boot chain (grub mode: shim + grubx64) ---"
+    SHIM=$(guestfish --ro -a "$QCOW2" -- \
+        run : mount /dev/sda1 / : find /EFI/redhat 2>/dev/null | grep 'shimx64\.efi$' || true)
+    GRUB=$(guestfish --ro -a "$QCOW2" -- \
+        run : mount /dev/sda1 / : find /EFI/redhat 2>/dev/null | grep 'grubx64\.efi$' || true)
+    UKI_LEFTOVER=$(guestfish --ro -a "$QCOW2" -- \
+        run : mount /dev/sda1 / : find /EFI/Linux 2>/dev/null | grep '\.efi$' || true)
+    [[ -n "$SHIM" ]] && ok "shimx64.efi present: $SHIM" || fail "shimx64.efi not found in EFI/redhat — grub boot chain broken"
+    [[ -n "$GRUB" ]] && ok "grubx64.efi present: $GRUB" || fail "grubx64.efi not found in EFI/redhat — grub boot chain broken"
+    [[ -z "$UKI_LEFTOVER" ]] && ok "No leftover UKI in EFI/Linux (clean grub image)" \
+        || fail "Leftover UKI file(s) in EFI/Linux — grub image was not cleaned up: $UKI_LEFTOVER"
 else
-    fail "No .efi files in EFI/Linux — UKI not installed"
+    echo "--- [3] UKI in EFI partition ---"
+    # V2 fix: mount EFI partition at / inside guestfish (no /boot/efi mountpoint
+    # on the EFI partition itself). Previously used -m /dev/sda1:/boot/efi which
+    # gave "mount point is not a directory" (hidden by 2>/dev/null) and falsely
+    # reported UKI/addon missing when they were present (seen in C-15 verify).
+    UKI_FILES=$(guestfish --ro -a "$QCOW2" -- \
+        run : mount /dev/sda1 / : find /EFI/Linux 2>/dev/null | grep '\.efi$' || true)
+    if [[ -n "$UKI_FILES" ]]; then
+        ok "UKI present in EFI/Linux: $(echo "$UKI_FILES" | tr '\n' ' ')"
+    else
+        fail "No .efi files in EFI/Linux — UKI not installed"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Verity addon alongside UKI
+# 4. Verity roothash delivery
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- [4] Verity addon ---"
-# V2 fix: same mount fix as section 3
-ADDON=$(guestfish --ro -a "$QCOW2" -- \
-    run : mount /dev/sda1 / : find /EFI/Linux 2>/dev/null | grep 'verity\.addon\.efi' || true)
-if [[ -n "$ADDON" ]]; then
-    ok "Verity addon present: $ADDON"
+if [[ "${BOOT_MODE}" == "grub" ]]; then
+    echo "--- [4] BLS entry with roothash= (grub mode) ---"
+    # Find /boot partition by XBOOTLDR GUID
+    BOOT_PART=""
+    for PNUM in 2 3 4 5; do
+        GUID=$(guestfish --ro -a "$QCOW2" -- run : part-get-gpt-type /dev/sda $PNUM 2>/dev/null | tr -d '\n' | tr '[:lower:]' '[:upper:]' || true)
+        if [[ "${GUID}" == "BC13C2FF-59E6-4262-A352-B275FD6F7172" ]]; then
+            BOOT_PART="/dev/sda${PNUM}"
+            break
+        fi
+    done
+    if [[ -z "$BOOT_PART" ]]; then
+        fail "Cannot find XBOOTLDR /boot partition — cannot check BLS entries"
+    else
+        ok "Found /boot partition: $BOOT_PART"
+        BLS_ENTRIES=$(guestfish --ro -a "$QCOW2" -- \
+            run : mount "$BOOT_PART" / : ls /loader/entries 2>/dev/null | grep '\.conf$' || true)
+        BLS_COUNT=$(echo "$BLS_ENTRIES" | grep -c '\.conf' || true)
+        if [[ $BLS_COUNT -eq 0 ]]; then
+            fail "No BLS entries found in /boot/loader/entries/ — inject_grub_cmdline did not run"
+        elif [[ $BLS_COUNT -gt 1 ]]; then
+            fail "Multiple BLS entries ($BLS_COUNT) — expected exactly 1 (no rescue entry)"
+        else
+            ok "Exactly 1 BLS entry: $BLS_ENTRIES"
+            # Build the full path: /loader/entries/<filename>
+            BLS_ENTRY_PATH="/loader/entries/$(echo "$BLS_ENTRIES" | tr -d '\n')"
+            BLS_OPTIONS=$(guestfish --ro -a "$QCOW2" -- \
+                run : mount "$BOOT_PART" / : cat "${BLS_ENTRY_PATH}" 2>/dev/null | grep '^options ' || true)
+            if echo "$BLS_OPTIONS" | grep -q 'roothash='; then
+                ok "BLS entry options contain roothash="
+            else
+                fail "BLS entry options do NOT contain roothash= — inject_grub_cmdline failed"
+                echo "    options line: $BLS_OPTIONS"
+            fi
+            if echo "$BLS_OPTIONS" | grep -q 'systemd\.verity_root_data='; then
+                ok "BLS entry options contain systemd.verity_root_data="
+            else
+                fail "BLS entry options missing systemd.verity_root_data= PARTUUID"
+            fi
+            if echo "$BLS_OPTIONS" | grep -q 'root=/dev/mapper/root'; then
+                ok "BLS entry options contain root=/dev/mapper/root"
+            else
+                fail "BLS entry options missing root=/dev/mapper/root"
+            fi
+        fi
+    fi
 else
-    fail "No verity.addon.efi found — dm-verity was not applied"
-    echo "    This means the verity container step silently failed (nbd modprobe?)"
+    echo "--- [4] Verity addon ---"
+    # V2 fix: same mount fix as section 3
+    ADDON=$(guestfish --ro -a "$QCOW2" -- \
+        run : mount /dev/sda1 / : find /EFI/Linux 2>/dev/null | grep 'verity\.addon\.efi' || true)
+    if [[ -n "$ADDON" ]]; then
+        ok "Verity addon present: $ADDON"
+    else
+        fail "No verity.addon.efi found — dm-verity was not applied"
+        echo "    This means the verity container step silently failed (nbd modprobe?)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -270,6 +346,7 @@ try:
         ('Build date',              d.get('build_date','?')),
         ('RHEL version',            d.get('rhel_version','?')),
         ('Kernel',                  d.get('kernel_version','?')),
+        ('Boot mode',               d.get('boot_mode', 'uki')),
         ('UKI filename',            d.get('uki_filename','?')),
         ('Payload image',           payload_img),
         ('Payload digest',          d.get('payload_digest','?')),

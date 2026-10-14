@@ -356,14 +356,26 @@ function inject_grub_cmdline()
     mount "$boot_dev" mnt
     boot_mounted=1
 
-    # 3. Check BLS entries exist
+    # 3. Remove rescue BLS entry if present — plan §4.1 requires exactly one entry.
+    # kernel-install creates it during Anaconda install regardless of kickstart settings.
+    if ls mnt/loader/entries/*-rescue.conf 2>/dev/null; then
+        echo "  Removing rescue BLS entry/entries..."
+        rm -f mnt/loader/entries/*-rescue.conf
+    fi
+
+    # 4. Check exactly one BLS entry exists
     local bls_entries=(mnt/loader/entries/*.conf)
     if [[ ${#bls_entries[@]} -eq 0 || ! -f "${bls_entries[0]}" ]]; then
         echo "ERROR: No BLS entry files found in /boot/loader/entries/" >&2
         exit 1
     fi
+    if [[ ${#bls_entries[@]} -gt 1 ]]; then
+        echo "ERROR: Multiple BLS entries after rescue removal — expected exactly 1:" >&2
+        ls mnt/loader/entries/*.conf >&2
+        exit 1
+    fi
 
-    # 4. For each entry, rewrite the options line
+    # 5. For each entry, rewrite the options line
     for entry in "${bls_entries[@]}"; do
         echo "  Processing BLS entry: $entry"
         local current_options=$(grep "^options " "$entry" | cut -d' ' -f2-)
@@ -378,7 +390,7 @@ function inject_grub_cmdline()
         echo "    New options: $(grep "^options " "$entry")"
     done
 
-    # 5. Assertions
+    # 6. Assertions
     local entries_count=${#bls_entries[@]}
     local match_count=$(grep -c "roothash=${RH}" mnt/loader/entries/*.conf || echo 0)
     if [[ "$match_count" -ne "$entries_count" ]]; then

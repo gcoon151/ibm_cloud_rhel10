@@ -345,16 +345,17 @@ EOF
 ln -sf ../gen-issue.service /etc/systemd/system/multi-user.target.wants/gen-issue.service
 echo "✓ gen-issue.service installed"
 
-# PCR8 extension with initdata.digest
+# process-user-data drop-in: mount config disk before provisioning.
+# Note: tpm2_pcrextend for PCR8 was removed — IBM TDX has no vTPM (/dev/tpm* absent),
+# so the call failed every boot. Initdata binding on IBM TDX uses MRCONFIGID/RTMR3
+# (to be confirmed), not a host-side PCR extension.
 mkdir -p /etc/systemd/system/process-user-data.service.d/
 cat <<'EOF' > /etc/systemd/system/process-user-data.service.d/10-override.conf
 [Service]
 # mount config disk if available
 ExecStartPre=-/bin/mount -t iso9660 -o ro /dev/disk/by-label/cidata /media/cidata
-# The digest is a string in hex representation, we truncate it to a 32 bytes hex string
-ExecStartPost=-/bin/bash -c 'tpm2_pcrextend 8:sha256=$(head -c64 /run/peerpod/initdata.digest)'
 EOF
-echo "✓ process-user-data PCR8 override installed"
+echo "✓ process-user-data override installed (no-vTPM: tpm2_pcrextend removed)"
 
 # ---------------------------------------------------------------------------
 # Step 6: Install Uptycs EDR agent
@@ -500,15 +501,10 @@ KA_VERSION=$(/usr/local/bin/kata-agent --version 2>/dev/null | awk '{print $3}' 
 PAYLOAD_IMAGE="${PODVM_BINARY:-unknown}"
 PAYLOAD_DIGEST="${PODVM_BINARY_DIGEST:-unknown}"
 
-# Map payload image to upstream guest components version
-GC_VERSION="unknown"
-if [[ "${PAYLOAD_IMAGE}" =~ 1\.13\.[0-9]+ ]]; then
-    GC_VERSION="v0.21.0+"
-elif [[ "${PAYLOAD_IMAGE}" =~ 1\.12\.[0-9]+ ]]; then
-    GC_VERSION="v0.18.0+"
-elif [[ "${PAYLOAD_IMAGE}" =~ 1\.10\.[0-9]+ ]]; then
-    GC_VERSION="~v0.12.x"
-fi
+# Guest components version: read from payload image label at build time (injected
+# as GC_VERSION by build-rhel10-overlay.sh Step 2, same as PODVM_BINARY).
+# Falls back to "unknown" if not injected — do NOT approximate from payload tag.
+GC_VERSION="${GC_VERSION:-unknown}"
 
 # Hard-fail on any bad value — a manifest recording "unknown" or a placeholder is worse than no manifest.
 if [[ "${PAYLOAD_IMAGE}" == "unknown" || -z "${PAYLOAD_IMAGE}" ]]; then

@@ -2,7 +2,7 @@
 
 Upstream reference: `https://github.com/confidential-devhub/coco-podvm-scripts`
 Local clone: `coco-podvm-scripts/` (workspace) and `~/gits/coco-podvm-scripts/` (build host)
-Last audited against upstream: 2026-10-07 (this file is the audit)
+Last audited against upstream: 2026-10-13 (this file is the audit)
 
 **Rule**: Every entry here must reflect a real, current difference between our copy and
 upstream. If upstream already does the same thing, it must NOT be listed here. If upstream
@@ -37,22 +37,23 @@ IBM modifications to upstream files live in:
 | A | `example_run.sh` | `sudo --preserve-env` instead of `sudo -E` | Ubuntu sudo-rs strips env with `-E` | Build silently uses wrong env |
 | B | `example_run.sh` | `-v /boot:/boot:ro`, `-v /dev:/dev` added | supermin needs host kernel; nbd nodes need live /dev | supermin fails on Ubuntu |
 | C | `example_run.sh` | `set -euo pipefail` + exit-code check on podman run | Without it, container failure exits 0 and broken QCOW2 proceeds to verity | Broken image silently passes |
-| D | `example_run.sh` | Registry auth bind-mount, PODVM_BINARY_DIGEST, SSHD_SERVICE, DEBUG_BUILD passthrough | IBM Cloud needs these env vars | registry.redhat.io pull fails |
+| D | `example_run.sh` | Registry auth bind-mount, PODVM_BINARY_DIGEST, SSHD_SERVICE, DEBUG_BUILD, BOOT_MODE passthrough | IBM Cloud needs these env vars | registry.redhat.io pull fails; grub mode ignored |
 | E | `coco-components.sh` | `set -e` at top | get-artifacts.sh failure is silently swallowed upstream | Failed payload pull → empty QCOW2 |
 | F | `podvm_maker.sh` | Entire file is IBM-written (not a modified upstream file) | Upstream podvm_maker.sh does ~15 lines; ours does IBM-specific config | N/A — must exist |
-| G | `script-disk-mods.sh` | No kernel install, no UKI copy, no BOOTX64.CSV write | Our kickstart base already has the correct UKI; upstream needs this because theirs doesn't | Would overwrite UKI or fail on missing kernel RPM |
+| G | `script-disk-mods.sh` | No kernel install, no UKI copy, no BOOTX64.CSV write | Our kickstart base already has the correct boot chain; upstream needs this because theirs doesn't | Would overwrite boot chain or fail on missing kernel RPM |
 | H | `script-disk-mods.sh` | ~~vendor-data disable config~~ **REVERTED** — IBM Cloud delivers SSH key via vendor-data; disabling it breaks SSH entirely | | |
 | I | `script-disk-mods.sh` | NVIDIA gated by env var, DEBUG_BUILD block | IBM additions, not in upstream | No functional impact if omitted |
 | J | `verity.sh` | `sgdisk -e` on nbd device after resize + after repart | qemu-img resize leaves GPT backup header at wrong offset; upstream does no GPT relocation | find_efi_root_part() fails → verity never runs |
 | K | `verity.sh` | Hard assertion: `/dev/nbd0` must be block device | modprobe nbd fails silently inside container without host module | Script proceeds with no nbd, "Process completed!" on broken image |
 | L | `verity.sh` | Hard assertion: verity partition visible after systemd-repart | Upstream only checks RH != "TBD"; doesn't verify partition is visible | Corrupt image with no verity hash, verity fails at boot |
-| M | `verity.sh` | Hard assertion: `verity.addon.efi` exists after ukify | Upstream has no check | UKI addon silently missing, verity hash never applied at boot |
+| M | `verity.sh` | `inject_grub_cmdline()` replaces `create_uki_addon()` when `BOOT_MODE=grub` | IBM TDX Secure Boot rejects unsigned addon EFI; UKI approach cannot deliver roothash under IBM's key set | dm-verity never enforced; root filesystem is writable |
 | N | `verity.sh` | EXIT trap preserves `$?`; upstream always exits 0 | `set -e` failures inside verity.sh were swallowed and caller saw success | Any verity failure looks like success |
 | O-1 | `luks-scratch/30-scratch.conf` | `SizeMaxBytes=268435456` (256 MB cap) | No cap → partition fills ~2.6 GB free space → LUKS+ext4 format takes ~90 s on IBM storage → exceeds hardcoded 30 s kata `checkRequestTimeout` → VM killed | scratch format takes ~90 s, VM dies before kata-agent handshakes |
 | O-2 | `luks-scratch/kata-agent.service.d/10-override.conf` | `After=luks-scratch.service` + `Requires=luks-scratch.service` in `[Unit]` | Without ordering kata-agent races ahead of luks-scratch, writes agent.sock, APF fires, 30 s clock starts before scratch is ready | kata-agent and APF start before scratch is formatted, VM killed at 48.7 s |
 | O-3 | `luks-scratch/format-scratch.sh` | `--pbkdf pbkdf2 --pbkdf-force-iterations 1000` + `mkfs.ext4 -m 0 -E nodiscard,lazy_itable_init=1,lazy_journal_init=1` | Argon2id default KDF takes ~7.4 s luksFormat + ~2 s luksOpen on NVMe (benchmarked). Key is random and ephemeral — strong KDF adds nothing. pbkdf2-1000 drops to <100 ms total KDF overhead. | With large partitions or slow KDF, format still risks racing the timeout |
-| O-4 | `luks-scratch/luks-scratch.service` + `luks-scratch/format-scratch.sh` | Removed `Requires=systemd-repart.service`, `After=systemd-repart.service`, `BindsTo=dev-disk-by\x2dpartlabel-scratch.device` from service unit; `format-scratch.sh` now calls `systemd-repart` directly with `--definitions=/usr/lib/repart.d` | System `systemd-repart.service` has a trigger condition: it only runs when dm-verity is active (roothash= in kernel cmdline). IBM Cloud rejects unsigned `verity.addon.efi`, so dm-verity is never active, repart is always skipped, the scratch device never appears, BindsTo fires no device unit, luks-scratch never starts. Running repart directly in format-scratch.sh bypasses the trigger condition. | Scratch partition is never created; luks-scratch never starts; kata-agent (Requires=luks-scratch) never starts; pod times out. |
+| O-4 | `luks-scratch/luks-scratch.service` + `luks-scratch/format-scratch.sh` | Removed `Requires=systemd-repart.service`, `After=systemd-repart.service`, `BindsTo=dev-disk-by\x2dpartlabel-scratch.device` from service unit; `format-scratch.sh` now calls `systemd-repart` directly with `--definitions=/usr/lib/repart.d` | System `systemd-repart.service` has a trigger condition: it only runs when dm-verity is active (roothash= in kernel cmdline). With the grub boot mode deviation M, dm-verity IS now active — but this deviation is retained as defence-in-depth until dm-verity is fully validated end-to-end on IBM Cloud. | Scratch partition is never created; luks-scratch never starts; kata-agent (Requires=luks-scratch) never starts; pod times out. |
 | O-5 | `luks-scratch/luks-scratch.service` | Removed `Wants=kata-agent.service` from service unit | Upstream unit includes `Wants=kata-agent.service` + `Before=kata-agent.service`. The `Wants=` pulls kata-agent in at boot before CDH socket is created (~3s race), causing kata-agent to fail probing CDH and panic at first container pull. | kata-agent starts prematurely at boot, CDH client is uninitialized, kata-agent panics on image pull. Revert condition: upstream drops `Wants=kata-agent.service` or kata-agent no longer probes CDH at startup. |
+| Q | `kickstart`, `verity.sh`, `podvm_maker.sh` | `BOOT_MODE=grub`: new kickstart `rhel10-dm-root-grub.ks` (3-partition: EFI + XBOOTLDR /boot + root), `inject_grub_cmdline()` in verity.sh, no tpm2_pcrextend drop-in | IBM TDX Secure Boot (IBM default db: Microsoft UEFI CA) rejects unsigned addon EFI — see full justification in §Q below | dm-verity never enforced on IBM Cloud TDX |
 
 ---
 
@@ -421,6 +422,163 @@ Before=kata-agent.service
 **Our fix**: `podvm_maker.sh` strips `Wants=kata-agent.service` from `luks-scratch.service` after extracting `luks-config.tar.gz`. `Before=kata-agent.service` is retained for proper ordering. `kata-agent.service` is activated properly via `kata-agent.path` once `agent.sock` is accessed and after CDH is running.
 
 **Revert condition**: Upstream drops `Wants=kata-agent.service` or kata-agent is updated so it no longer probes CDH prematurely at startup.
+
+---
+
+## Q: BOOT_MODE=grub — replace UKI+addon with grub+BLS+attestation
+
+**Status**: Active from `rhel10-2026101216`. Gates: E1 probe passed 2026-10-13. Full RTMR2 attestation not yet configured (Trustee policy pending — §Q.6 below).
+
+### Q.1 What upstream does
+
+Upstream boots exclusively via a **Unified Kernel Image (UKI)**:
+
+```
+shimx64.efi (Microsoft-signed → Red Hat CA)
+  └─ kernel-uki-virt-<ver>.efi  (Red Hat-signed, single EFI binary)
+       contains: kernel + initramfs + .cmdline (includes roothash=)
+                 .extra.d/verity.addon.efi  (image-specific, IBM-unsigned)
+```
+
+The verity addon is the mechanism for delivering the per-image `roothash=` at boot.
+The Red Hat-signed UKI itself is trusted. The unsigned addon is loaded by `systemd-stub`
+and appended to the cmdline if and only if Secure Boot policy permits loading unsigned addons.
+
+### Q.2 Why this does not work on IBM Cloud TDX
+
+IBM TDX VSIs boot with **Secure Boot ON** using IBM's default keys (Microsoft UEFI CA
+in db — the standard OEM database). There is no mechanism to enroll custom keys:
+- **MOK** is rejected: the untrusted hypervisor host controls the UEFI variables; any
+  key we enroll via MOK could be removed or replaced by the host before attestation.
+- **Custom db cert** (plan option 2a): requires IBM to provision a customer-specific
+  Secure Boot db entry — IBM does not currently offer this.
+
+Under these constraints, `systemd-stub` silently drops the unsigned addon:
+```
+stub.c:597@load_addons: Failed to read 'verity.addon.efi': Security violation
+Kernel command line: console=tty0 console=ttyS0   ← no roothash=
+EXT4-fs (vda2): mounted filesystem read-write
+```
+(Observed on IBM serial console, sessions C-19/C-24, Oct 2026. Confirmed: locally with
+OVMF Secure Boot OFF the same image loads the addon and verity is active — the hash data
+is correct; only the trust chain is broken.)
+
+**The consequence**: root filesystem is mounted read-write with no integrity checking.
+An attacker with host access could modify the peer-pod VM's root filesystem undetected.
+Attestation cannot detect this because nothing in the measurement log records the
+filesystem state — only the UKI binary (which is unmodified) is measured.
+
+### Q.3 Our solution: grub boot chain + BLS entry + RTMR2 attestation
+
+```
+shimx64.efi  (Microsoft-signed; contains Red Hat Secure Boot CA 5 + CA 8)   → RTMR1
+  └─ grubx64.efi  (Red Hat Secure Boot Signing 802, signed with RH CA 5)    → RTMR1
+       reads /boot/loader/entries/<machine-id>-<kernel>.conf  (unsigned BLS)
+       measures: every grub command, kernel cmdline incl. roothash=          → RTMR2
+       measures: loaded vmlinuz + initramfs                                  → RTMR2
+       └─ vmlinuz (Red Hat-signed) + initramfs (dracut with veritysetup)
+            cmdline: root=/dev/mapper/root
+                     systemd.verity_root_data=PARTUUID=<root-partuuid>
+                     systemd.verity_root_hash=PARTUUID=<verity-partuuid>
+                     roothash=<64 hex chars>
+                     systemd.verity_root_options=panic-on-corruption
+                     systemd.volatile=overlay
+```
+
+dm-verity mounts `/dev/mapper/root` (read-only, verified) with a tmpfs overlay.
+The writable tmpfs overlay is ephemeral: it is destroyed when the VM powers off.
+Nothing in the verified root filesystem can be persistently modified at runtime.
+
+### Q.4 Why this is at least as secure as the UKI approach — and more honest
+
+**Signing vs. measurement — the core tradeoff:**
+
+The UKI approach relies on **signing** (the firmware verifies the UKI binary before
+executing it). The grub approach relies on **measurement** (grub records exactly what it
+loaded and what arguments it passed, and Trustee refuses to release secrets unless those
+measurements match a known-good set of reference values).
+
+Under the UKI approach on IBM Cloud today, the unsigned addon is silently dropped — so
+dm-verity is NOT active despite the UKI being signed. The current production image has a
+signed boot chain but an unverified, writable root filesystem. There is no attestation
+policy enforcing the roothash. **Signing without enforcement is weaker than measurement
+with enforcement.**
+
+The grub approach, once Trustee reference values are configured (§Q.6), provides:
+
+| Property | UKI approach (IBM Cloud today) | grub approach (this deviation) |
+|---|---|---|
+| shimx64.efi signature | ✅ Microsoft CA | ✅ Microsoft CA (unchanged) |
+| grubx64.efi signature | present but bypassed (UKI path) | ✅ Red Hat CA (verified by shim) |
+| vmlinuz signature | ✅ Red Hat CA | ✅ Red Hat CA (verified by shim/grub) |
+| roothash= in cmdline | ❌ absent (unsigned addon rejected) | ✅ in BLS entry, measured by grub |
+| dm-verity active | ❌ root is rw, unverified | ✅ root is ro, verified |
+| root fs integrity | ❌ not enforced | ✅ panic-on-corruption |
+| RTMR1 (shim+grub) | measured (UKI path) | ✅ measured (same shim, now grub too) |
+| RTMR2 (cmdline+initrd) | measured (stub) but roothash absent | ✅ measured by grub incl. roothash= |
+| Attestation can bind to fs state | ❌ no (nothing measures roothash) | ✅ yes (RTMR2 contains roothash) |
+| Trustee can enforce fs integrity | ❌ no reference value available | ✅ yes (pending §Q.6) |
+
+**The BLS entry is unsigned — is that a problem?**
+
+The BLS entry (in `/boot`) is not signed by Red Hat or IBM. An attacker with host
+access could in principle modify it. However:
+- If the BLS entry is modified (e.g. `roothash=` changed or removed), grub measures
+  the modified cmdline into RTMR2. RTMR2 no longer matches the reference values.
+  Trustee refuses to release secrets. The VM boots but receives nothing from KBS —
+  no image-decryption keys, no credentials, no CDH-gated resources.
+- If `roothash=` is removed, dracut's veritysetup generator does not run, root is
+  mounted rw. The guest detects no dm-verity (`/proc/cmdline` lacks `roothash=`),
+  which triggers Test 11 FAIL in the test suite and is detectable by the operator.
+- The `/boot` partition is measured (grub reads and executes the BLS entry), not merely
+  hashed at build time. Any byte-level change to the BLS entry or to grubenv changes
+  RTMR2. **The measurement provides integrity even though the file is unsigned.**
+
+**Does the grub approach match RHEL's secure boot design intent?**
+
+Yes. Red Hat's own RHEL 10 grub (grub 2.12) and shim include the
+`EFI_CC_MEASUREMENT_PROTOCOL` GUID, confirming they are TDX-measurement-aware.
+The stock Red Hat-signed grub chain is exactly what RHEL customers with standard
+(non-UKI) RHEL 10 deployments use. The UKI path is a convenience for environments
+where addon signing is feasible. Where it is not (IBM TDX), the grub + attestation
+path is the Red Hat-endorsed alternative.
+
+### Q.5 What changed in our build
+
+| Component | Change |
+|---|---|
+| `helpers/rhel10-dm-root-grub.ks` | New kickstart (3 partitions: EFI C12A7328, XBOOTLDR /boot BC13C2FF, root 4F68BCE3). Packages: `kernel-core`, `grub2-efi-x64`, `shim-x64`, `grubby`, `dracut` instead of `kernel-uki-virt`. Adds `systemd-veritysetup` dracut module. Removes rescue BLS entry. Locks `shim-x64`, `grub2-efi-x64`, `grub2-common`, `kernel-core` with versionlock. |
+| `rhel10-experimental/scripts/patches/verity.sh` | Added `inject_grub_cmdline()`. When `BOOT_MODE=grub`: mounts XBOOTLDR `/boot` rw, removes rescue BLS entry, rewrites `options` line with `root=/dev/mapper/root systemd.verity_root_data=PARTUUID=<root> systemd.verity_root_hash=PARTUUID=<verity> roothash=<RH> systemd.verity_root_options=panic-on-corruption systemd.volatile=overlay`. Asserts exactly 1 BLS entry with roothash after update. Replaces `create_uki_addon()` (ukify) in the `BOOT_MODE=grub` path. |
+| `scripts/coco/podvm/podvm_maker.sh` | Removed `tpm2_pcrextend 8:sha256=...` ExecStartPost from `process-user-data` drop-in. IBM TDX has no vTPM (`/dev/tpm*` absent); call failed every boot. Initdata binding on IBM TDX is via MRCONFIGID/RTMR3 (not PCR8). |
+| `scripts/coco/podvm/example_run.sh` | Added `BOOT_MODE` passthrough to container (`-e BOOT_MODE`). |
+| `scripts/verify-qcow2.sh` | Added `--boot-mode grub` flag. Checks [2]/[3]/[4] are now boot-mode-aware: grub mode checks XBOOTLDR GUID, shimx64+grubx64 presence, 1 BLS entry with roothash=/systemd.verity_root_data=/root=/dev/mapper/root. |
+| `helpers/rebuild-base-rhel10.sh` | Added `--boot-mode grub` flag. Selects grub kickstart, 10 GiB disk, and grub-specific Step 3 (XBOOTLDR GUID) and Step 4 (shim+grub+BLS) checks. |
+
+### Q.6 What is NOT yet done (pending — Trustee reference values)
+
+The build is complete and dm-verity is active at boot. However the security claim in §Q.4
+— that Trustee enforces RTMR2 integrity — requires:
+
+1. **Reference value generation**: boot the image on IBM TDX once, read the CCEL event
+   log, extract RTMR1 and RTMR2 values, cross-check by replaying grub events.
+2. **Trustee RVPS policy**: load reference values into RVPS; write a TDX attestation
+   policy requiring `rtmr1 == ref` and `rtmr2 == ref` (the roothash= cmdline must be
+   present and exact). Until this step is done, `insecureAcceptAnything` is in effect.
+3. **Negative tests**: (a) modify one hex char of `roothash=` in the BLS entry → attestation
+   must fail; (b) flip one byte in the root filesystem → verity panic at boot.
+
+Until step 2 is complete, the grub boot mode provides **dm-verity filesystem integrity**
+(hardware-enforced, not bypassable at runtime) but **not Trustee-bound attestation**.
+This is already stronger than the UKI approach on IBM Cloud today, where dm-verity is
+absent. The attestation step is tracked as the next deliverable after this image is
+validated end-to-end.
+
+### Q.7 Revert condition
+
+IBM provides a mechanism to enroll a custom Secure Boot db certificate (plan option 2a in
+`UKI_SECUREBOOT_COEXISTENCE_PLAN.md`). In that case: sign `verity.addon.efi` with our
+cert, revert to the UKI kickstart, remove `inject_grub_cmdline()`, keep all other
+deviations. The grub base image and kickstart remain available as a fallback.
 
 ---
 

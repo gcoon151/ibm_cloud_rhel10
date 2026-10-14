@@ -41,7 +41,7 @@ fi
 # Defaults
 PAYLOAD_TAG="${PAYLOAD_TAG:-1.13.1}"
 SSHD_SERVICE="${SSHD_SERVICE:-true}"
-OUTPUT_PREFIX="${OUTPUT_PREFIX:-rhel10}"
+OUTPUT_PREFIX="${OUTPUT_PREFIX:-$([[ "${HARDENED:-}" == "1" ]] && echo rhel10-hardened || echo rhel10)}"
 BOOT_MODE="${BOOT_MODE:-grub}"
 DATE=$(date -u +%Y%m%d%H)
 # Overlay output goes alongside the base in /var/lib/libvirt/images/rhel10/
@@ -155,15 +155,46 @@ if [[ -z "${PODVM_BINARY_DIGEST_FOR_INJECT}" || \
 fi
 echo "  ✓ Digest: ${PODVM_BINARY_DIGEST_FOR_INJECT}"
 
+# Read the exact guest-components git commit from the kata-containers versions.yaml
+# on the osc-release-v1.13 branch — this is the authoritative source for what was
+# compiled into the payload image.
+KATA_VERSIONS_YAML="${SCRIPT_DIR}/../../upstream-repos/kata-containers/versions.yaml"
+GC_VERSION_FOR_INJECT="unknown"
+if [[ -f "${KATA_VERSIONS_YAML}" ]]; then
+    GC_SHA=$(python3 -c "
+import re
+in_gc = False
+for line in open('${KATA_VERSIONS_YAML}'):
+    stripped = line.strip()
+    if 'coco-guest-components:' in stripped:
+        in_gc = True
+    elif in_gc and re.match(r'\s+version:\s+', line):
+        print(stripped.split(':', 1)[1].strip().strip('\"'))
+        break
+    elif in_gc and re.match(r'^[a-z]', line):
+        break
+" 2>/dev/null || echo "")
+    if [[ -n "${GC_SHA}" && "${GC_SHA}" != "unknown" ]]; then
+        GC_VERSION_FOR_INJECT="${GC_SHA}"
+        echo "  ✓ Guest components commit: ${GC_VERSION_FOR_INJECT}"
+    else
+        echo "  [WARN] Could not parse coco-guest-components version from versions.yaml — GC_VERSION will be 'unknown'"
+    fi
+else
+    echo "  [WARN] versions.yaml not found at ${KATA_VERSIONS_YAML} — GC_VERSION will be 'unknown'"
+fi
+
 # Use python3 for safe injection (avoids sed delimiter conflicts in URLs/digests)
 python3 - "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/podvm_maker.sh" \
            "${PODVM_BINARY_FOR_INJECT}" \
-           "${PODVM_BINARY_DIGEST_FOR_INJECT}" <<'PYEOF'
+           "${PODVM_BINARY_DIGEST_FOR_INJECT}" \
+           "${GC_VERSION_FOR_INJECT}" <<'PYEOF'
 import sys, re
 
 script_path  = sys.argv[1]
 podvm_binary  = sys.argv[2]
 podvm_digest  = sys.argv[3]
+gc_version   = sys.argv[4]
 
 with open(script_path) as f:
     content = f.read()
@@ -172,6 +203,7 @@ with open(script_path) as f:
 content = re.sub(r'^# B2-injected.*\n', '', content, flags=re.MULTILINE)
 content = re.sub(r'^PODVM_BINARY=.*\n',        '', content, flags=re.MULTILINE)
 content = re.sub(r'^PODVM_BINARY_DIGEST=.*\n', '', content, flags=re.MULTILINE)
+content = re.sub(r'^GC_VERSION=.*\n',          '', content, flags=re.MULTILINE)
 
 # Insert after the shebang line
 shebang_end = content.index('\n') + 1
@@ -179,6 +211,7 @@ inject = (
     f"# B2-injected by build-rhel10-overlay.sh Step 2 — do not edit manually\n"
     f"PODVM_BINARY={podvm_binary!r}\n"
     f"PODVM_BINARY_DIGEST={podvm_digest!r}\n"
+    f"GC_VERSION={gc_version!r}\n"
 )
 content = content[:shebang_end] + inject + content[shebang_end:]
 
@@ -212,6 +245,7 @@ if [[ -z "${UPTYCS_TARBALL_SRC}" || ! -s "${UPTYCS_TARBALL_SRC}" ]]; then
 fi
 cp "${UPTYCS_TARBALL_SRC}"                               "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/uptycs-complete.tar.gz"
 cp "${REPO_ROOT}/scripts/coco/podvm/install-uptycs.sh"   "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
+cp "${REPO_ROOT}/scripts/coco/podvm/cis-harden.sh"      "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
 cp "${REPO_ROOT}/scripts/coco/podvm/provision-uptycs.sh" "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
 cp "${REPO_ROOT}/services/uptycs-osquery.service"        "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/"
 chmod 0755 "${COCO_SCRIPTS_DIR}/scripts/coco/podvm/install-uptycs.sh" \
@@ -308,6 +342,7 @@ export SSHD_SERVICE="${SSHD_SERVICE}"
 export NVIDIA_DRIVER_VERSION=""
 export DEBUG_BUILD="${DEBUG_BUILD:-}"
 export BOOT_MODE="${BOOT_MODE}"
+export HARDENED="${HARDENED:-}"
 # ACTIVATION_KEY must be exported for create-verity-podvm.sh's inner build.
 export ACTIVATION_KEY ORG_ID
 
@@ -551,6 +586,23 @@ if [[ "${UPTYCS_FAIL}" -ne 0 ]]; then
     exit 1
 fi
 echo "✓ Uptycs EDR installed and enabled"
+
+# ---------------------------------------------------------------------------
+# STEP 5f: HARDENED=1 only — assert cis-harden.sh ran and fwupd is gone (host-side, on the QCOW2)
+# ---------------------------------------------------------------------------
+if [[ "${HARDENED:-}" == "1" ]]; then
+    echo ""
+    echo "--- Step 5f: Verifying CIS hardening in image ---"
+    HF=0
+    for f in /etc/podvm-cis-hardened /etc/ssh/sshd_config.d/00-cis.conf /etc/sysctl.d/99-cis.conf /etc/modprobe.d/cis-sctp.conf /etc/cron.allow; do
+        [[ "$(guestfish --ro -a "${OUTPUT_QCOW2}" -m "${SCRATCH_CHECK_PART}" -- is-file "$f" 2>/dev/null || echo false)" == "true" ]] && echo "  ✓ $f" || { echo "  ✗ $f" >&2; HF=1; }
+    done
+    [[ "$(guestfish --ro -a "${OUTPUT_QCOW2}" -m "${SCRATCH_CHECK_PART}" -- readlink /etc/systemd/system/fwupd-refresh.timer 2>/dev/null || echo none)" == "/dev/null" ]] && echo "  ✓ fwupd-refresh.timer masked" || { echo "  ✗ fwupd-refresh.timer not masked" >&2; HF=1; }
+    BN=$(guestfish --ro -a "${OUTPUT_QCOW2}" -m "${SCRATCH_CHECK_PART}" -- cat /etc/issue.net 2>/dev/null || true)
+    [[ "${BN}" == "Authorized users only. All activity may be monitored and reported." ]] && echo "  ✓ /etc/issue.net banner" || { echo "  ✗ /etc/issue.net banner wrong: ${BN}" >&2; HF=1; }
+    [[ "${HF}" -eq 0 ]] || { echo "ERROR: CIS hardening not correctly applied to ${OUTPUT_QCOW2}" >&2; exit 1; }
+    echo "✓ CIS hardening verified"
+fi
 
 echo ""
 echo "✓ All verification checks passed. Ready to upload."

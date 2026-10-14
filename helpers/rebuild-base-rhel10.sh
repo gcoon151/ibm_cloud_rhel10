@@ -6,7 +6,8 @@
 # Deviations: see rhel10-experimental/UPSTREAM_DEVIATIONS.md
 #
 # Produces a date-stamped, read-only base QCOW2:
-#   /var/lib/libvirt/images/rhel10/rhel10-ks-base-YYYYMMDD.qcow2
+#   /var/lib/libvirt/images/rhel10/rhel10-ks-base-YYYYMMDD.qcow2      (uki mode)
+#   /var/lib/libvirt/images/rhel10/rhel10-grub-base-YYYYMMDD.qcow2    (grub mode)
 #
 # Location: /var/lib/libvirt/images/rhel10/
 #   owned gcoon:gcoon, ACL grants libvirt-qemu r-x so qemu:///system can
@@ -19,7 +20,8 @@
 # file to the overlay script — only pass copies.
 #
 # Usage:
-#   bash helpers/rebuild-base-rhel10.sh
+#   bash helpers/rebuild-base-rhel10.sh                      # UKI mode (default)
+#   bash helpers/rebuild-base-rhel10.sh --boot-mode grub     # grub+verity mode
 #   bash helpers/rebuild-base-rhel10.sh --iso /path/to/rhel-10.2-x86_64-dvd.iso
 #
 # The script exits non-zero and does nothing if a base for today already exists.
@@ -33,24 +35,37 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Output goes to /var/lib/libvirt/images/rhel10 — owned by gcoon, ACL grants
 # libvirt-qemu r-x so qemu:///system can read the disk during virt-install.
 IMAGE_DIR="/var/lib/libvirt/images/rhel10"
-# Allow overriding the kickstart file for baseline runs (B-0 uses upstream verbatim).
-KS_FILE="${KS_OVERRIDE:-${SCRIPT_DIR}/rhel10-dm-root.ks}"
 DATE=$(date -u +%Y%m%d)
-# OUTPUT_PREFIX lets B-0 and other named runs coexist with the default build
-BASE_PREFIX="${OUTPUT_PREFIX:-rhel10-ks-base}"
-OUTPUT_IMAGE="${IMAGE_DIR}/${BASE_PREFIX}-${DATE}.qcow2"
-VM_NAME="rhel10-ks-build-${BASE_PREFIX}-${DATE}"
 
 # Default ISO location — override with --iso flag
 ISO_PATH="${HOME}/rhel-10.2-x86_64-dvd.iso"
+# Default boot mode — override with --boot-mode grub
+BOOT_MODE="uki"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --iso) ISO_PATH="$2"; shift 2 ;;
+        --iso)        ISO_PATH="$2"; shift 2 ;;
+        --boot-mode)  BOOT_MODE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+# Select kickstart and output naming based on boot mode
+if [[ "${BOOT_MODE}" == "grub" ]]; then
+    KS_FILE="${KS_OVERRIDE:-${SCRIPT_DIR}/rhel10-dm-root-grub.ks}"
+    KS_NAME="rhel10-dm-root-grub.ks"
+    BASE_PREFIX="${OUTPUT_PREFIX:-rhel10-grub-base}"
+    DISK_SIZE=10   # grub mode needs /boot partition + root; 10 GiB vs 7 GiB
+else
+    KS_FILE="${KS_OVERRIDE:-${SCRIPT_DIR}/rhel10-dm-root.ks}"
+    KS_NAME="rhel10-dm-root.ks"
+    BASE_PREFIX="${OUTPUT_PREFIX:-rhel10-ks-base}"
+    DISK_SIZE=7
+fi
+
+OUTPUT_IMAGE="${IMAGE_DIR}/${BASE_PREFIX}-${DATE}.qcow2"
+VM_NAME="rhel10-ks-build-${BASE_PREFIX}-${DATE}"
 
 echo "================================================================="
 echo "RHEL 10 base QCOW2 rebuild  —  Layer 1 of 3"
@@ -108,11 +123,11 @@ virt-install \
     --name "${VM_NAME}" \
     --memory 8192 \
     --location "${ISO_PATH}" \
-    --disk "path=${OUTPUT_IMAGE},format=qcow2,bus=scsi,size=7" \
+    --disk "path=${OUTPUT_IMAGE},format=qcow2,bus=scsi,size=${DISK_SIZE}" \
     --initrd-inject="${KS_FILE}" \
     --nographics \
     --noautoconsole \
-    --extra-args "console=ttyS0 inst.ks=file:/rhel10-dm-root.ks" \
+    --extra-args "console=ttyS0 inst.ks=file:/${KS_NAME}" \
     --transient 2>&1 | tee "${IMAGE_DIR}/rhel10-virt-install-${DATE}.log"
 
 echo ""
@@ -193,61 +208,104 @@ SFDISK_OUT=$(sudo sfdisk -d "${RAW_TMP}" 2>/dev/null)
 sudo rm -f "${RAW_TMP}"
 echo "${SFDISK_OUT}"
 
-# Two-partition layout (deviation #14 rhsm-rw removed): sda1=EFI, sda2=root.
-EFI_GUID=$(echo "${SFDISK_OUT}"  | grep 'raw1 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
-ROOT_GUID=$(echo "${SFDISK_OUT}" | grep 'raw2 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
-
-echo "  EFI  partition GUID: ${EFI_GUID}  (sda1)"
-echo "  Root partition GUID: ${ROOT_GUID}  (sda2)"
-
 # Assert no linux-generic partition exists (would block systemd-repart from creating scratch)
 LINUX_GENERIC=$(echo "${SFDISK_OUT}" | grep -i '0FC63DAF' || true)
 if [[ -n "${LINUX_GENERIC}" ]]; then
     echo "ERROR: linux-generic partition (0FC63DAF) found in base image — repart will match it instead of creating scratch" >&2
-    echo "       Remove the rhsm-rw partition from the kickstart." >&2
     echo "       ${LINUX_GENERIC}" >&2
     exit 1
 fi
+
+EFI_GUID=$(echo "${SFDISK_OUT}"  | grep 'raw1 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
+echo "  EFI  partition GUID: ${EFI_GUID}  (sda1)"
 
 GUID_OK=true
 if ! echo "${EFI_GUID}" | grep -qi "C12A7328"; then
     echo "ERROR: EFI partition GUID wrong. Expected C12A7328-F81F-11D2-BA4B-00A0C93EC93B" >&2
     GUID_OK=false
 fi
-if ! echo "${ROOT_GUID}" | grep -qi "4F68BCE3"; then
-    echo "ERROR: Root partition GUID wrong. Expected 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709" >&2
-    GUID_OK=false
+
+if [[ "${BOOT_MODE}" == "grub" ]]; then
+    # grub mode: sda1=EFI, sda2=/boot (XBOOTLDR BC13C2FF), sda3=root (4F68BCE3)
+    BOOT_GUID=$(echo "${SFDISK_OUT}" | grep 'raw2 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
+    ROOT_GUID=$(echo "${SFDISK_OUT}" | grep 'raw3 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
+    echo "  /boot partition GUID: ${BOOT_GUID}  (sda2)"
+    echo "  Root partition GUID:  ${ROOT_GUID}  (sda3)"
+    if ! echo "${BOOT_GUID}" | grep -qi "BC13C2FF"; then
+        echo "ERROR: /boot partition GUID wrong. Expected BC13C2FF (XBOOTLDR)" >&2
+        GUID_OK=false
+    fi
+    if ! echo "${ROOT_GUID}" | grep -qi "4F68BCE3"; then
+        echo "ERROR: Root partition GUID wrong. Expected 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709" >&2
+        GUID_OK=false
+    fi
+    [[ "${GUID_OK}" = true ]] && echo "✓ Partition GUIDs correct (sda1=EFI, sda2=XBOOTLDR /boot, sda3=root, no linux-generic)"
+else
+    # uki mode: sda1=EFI, sda2=root
+    ROOT_GUID=$(echo "${SFDISK_OUT}" | grep 'raw2 ' | grep -oi 'type=[0-9A-Fa-f-]*' | cut -d= -f2 || true)
+    echo "  Root partition GUID: ${ROOT_GUID}  (sda2)"
+    if ! echo "${ROOT_GUID}" | grep -qi "4F68BCE3"; then
+        echo "ERROR: Root partition GUID wrong. Expected 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709" >&2
+        GUID_OK=false
+    fi
+    [[ "${GUID_OK}" = true ]] && echo "✓ Partition GUIDs correct (sda1=EFI, sda2=root, no linux-generic partition)"
 fi
+
 if [[ "${GUID_OK}" = false ]]; then
     echo "GUID check failed. Image left at ${OUTPUT_IMAGE} for inspection." >&2
     exit 1
 fi
-echo "✓ Partition GUIDs correct (sda1=EFI, sda2=root, no linux-generic partition)"
 
-# --- Step 4: Confirm UKI is in EFI partition --------------------------------
+# --- Step 4: Confirm boot chain is in EFI partition -------------------------
 echo ""
 echo "--- Step 4: EFI partition contents ---"
 
-EFI_CONTENTS=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda1 \
-    ls /EFI/Linux/ 2>/dev/null | grep -v 'libguestfs:' || true)
-
-echo "  /EFI/Linux/ contents:"
-echo "${EFI_CONTENTS}" | sed 's/^/    /'
-
-EFI_COUNT=$(echo "${EFI_CONTENTS}" | grep -c '\.efi$' || true)
-if [[ ${EFI_COUNT} -eq 0 ]]; then
-    echo "ERROR: No .efi file in /EFI/Linux/ — UKI was not placed by kickstart." >&2
-    echo "       Check that kernel-uki-virt is in %packages and kernel-install ran." >&2
-    rm -f "${OUTPUT_IMAGE}"
-    exit 1
+if [[ "${BOOT_MODE}" == "grub" ]]; then
+    SHIM=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda1 \
+        ls /EFI/redhat/ 2>/dev/null | grep -i 'shimx64\.efi' || true)
+    GRUBX=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda1 \
+        ls /EFI/redhat/ 2>/dev/null | grep -i 'grubx64\.efi' || true)
+    UKI_LEFTOVER=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda1 \
+        find /EFI/Linux 2>/dev/null | grep '\.efi$' || true)
+    if [[ -z "${SHIM}" ]]; then
+        echo "ERROR: shimx64.efi not found in EFI/redhat/ — grub boot chain not installed" >&2
+        rm -f "${OUTPUT_IMAGE}"; exit 1
+    fi
+    if [[ -z "${GRUBX}" ]]; then
+        echo "ERROR: grubx64.efi not found in EFI/redhat/ — grub boot chain not installed" >&2
+        rm -f "${OUTPUT_IMAGE}"; exit 1
+    fi
+    if [[ -n "${UKI_LEFTOVER}" ]]; then
+        echo "WARNING: Leftover UKI file(s) in EFI/Linux — not expected in grub mode: ${UKI_LEFTOVER}" >&2
+    fi
+    # Check /boot BLS entries exist (initramfs was regenerated by kickstart)
+    BLS=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda2 \
+        find /loader/entries 2>/dev/null | grep '\.conf$' || true)
+    BLS_COUNT=$(echo "${BLS}" | grep -c '\.conf' || true)
+    if [[ ${BLS_COUNT} -eq 0 ]]; then
+        echo "ERROR: No BLS entries in /boot/loader/entries/ — grub/dracut did not run" >&2
+        rm -f "${OUTPUT_IMAGE}"; exit 1
+    fi
+    KERNEL_VER=$(echo "${BLS}" | grep -oP '\d+\.\d+\.\d+-\d+\.\d+\.\d+\.[^.]+' | head -1 || true)
+    echo "✓ grub boot chain: shimx64.efi + grubx64.efi present, ${BLS_COUNT} BLS entry/entries"
+    echo "✓ kernel: ${KERNEL_VER}"
+else
+    EFI_CONTENTS=$(guestfish --ro -a "${OUTPUT_IMAGE}" -m /dev/sda1 \
+        ls /EFI/Linux/ 2>/dev/null | grep -v 'libguestfs:' || true)
+    echo "  /EFI/Linux/ contents:"
+    echo "${EFI_CONTENTS}" | sed 's/^/    /'
+    EFI_COUNT=$(echo "${EFI_CONTENTS}" | grep -c '\.efi$' || true)
+    if [[ ${EFI_COUNT} -eq 0 ]]; then
+        echo "ERROR: No .efi file in /EFI/Linux/ — UKI was not placed by kickstart." >&2
+        echo "       Check that kernel-uki-virt is in %packages and kernel-install ran." >&2
+        rm -f "${OUTPUT_IMAGE}"; exit 1
+    fi
+    if [[ ${EFI_COUNT} -gt 1 ]]; then
+        echo "WARNING: ${EFI_COUNT} .efi files found — expected exactly 1." >&2
+    fi
+    KERNEL_VER=$(echo "${EFI_CONTENTS}" | grep '\.efi$' | grep -oP '\d+\.\d+\.\d+-\d+\.\d+\.\d+\.[^.]+' | head -1 || true)
+    echo "✓ UKI present: kernel ${KERNEL_VER}"
 fi
-if [[ ${EFI_COUNT} -gt 1 ]]; then
-    echo "WARNING: ${EFI_COUNT} .efi files found — expected exactly 1." >&2
-    echo "         This may be harmless but review the kickstart." >&2
-fi
-
-KERNEL_VER=$(echo "${EFI_CONTENTS}" | grep '\.efi$' | grep -oP '\d+\.\d+\.\d+-\d+\.\d+\.\d+\.[^.]+' | head -1 || true)
-echo "✓ UKI present: kernel ${KERNEL_VER}"
 
 # --- Step 5: Mark read-only and record --------------------------------------
 echo ""
@@ -268,4 +326,4 @@ echo "  Built:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "================================================================="
 echo ""
 echo "Next step — run the overlay build against this base:"
-echo "  bash rhel10-experimental/scripts/build-rhel10-overlay.sh ${OUTPUT_IMAGE}"
+echo "  BOOT_MODE=${BOOT_MODE} bash rhel10-experimental/scripts/build-rhel10-overlay.sh ${OUTPUT_IMAGE}"

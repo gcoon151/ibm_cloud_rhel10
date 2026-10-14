@@ -99,6 +99,13 @@ for f in uptycs-complete.tar.gz provision-uptycs.sh uptycs-osquery.service insta
     fi
 done
 
+# IBM MOD: HARDENED=1 -> CIS safe-tier hardening (scripts/coco/podvm/cis-harden.sh), run before verity.
+HARDEN_ARGS=()
+if [[ "${HARDENED:-}" == "1" ]]; then
+    [[ -s "$ARTIFACTS_FOLDER/cis-harden.sh" ]] || { echo "ERROR: HARDENED=1 but $ARTIFACTS_FOLDER/cis-harden.sh missing" >&2; exit 1; }
+    HARDEN_ARGS=(--run "$ARTIFACTS_FOLDER/cis-harden.sh")
+fi
+
 virt-customize --memsize 8192 \
     "${SM_REGISTER[@]}" \
     --run-command "printf 'BOOT_MODE=%s\n' '${BOOT_MODE:-grub}' > /etc/podvm-build-env" \
@@ -111,6 +118,7 @@ virt-customize --memsize 8192 \
     --copy-in $ARTIFACTS_FOLDER/uptycs-osquery.service:/tmp/ \
     --run $ARTIFACTS_FOLDER/podvm_maker.sh \
     --run $ARTIFACTS_FOLDER/install-uptycs.sh \
+    "${HARDEN_ARGS[@]}" \
     ${EXTRA_ARGS} \
     -a $INPUT_IMAGE
 

@@ -103,6 +103,10 @@ grub2-mkconfig -o /boot/grub2/grub.cfg
 echo 'add_dracutmodules+=" systemd-veritysetup "' > /etc/dracut.conf.d/90-verity.conf
 dracut -f --regenerate-all
 
+# Remove the rescue BLS entry — we require exactly one BLS entry (plan §4.1)
+rm -f /boot/loader/entries/*-rescue.conf
+rm -f /boot/vmlinuz-0-rescue-* /boot/initramfs-0-rescue-*.img 2>/dev/null || true
+
 # Lock packages to installed versions to prevent unexpected reference measurement changes
 yum versionlock add shim-x64 grub2-efi-x64 grub2-common kernel-core
 
